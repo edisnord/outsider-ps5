@@ -15,7 +15,7 @@ a way to mount a title folder (a title mounter). This package does not include a
 2. Copy the folder to the console, for example with FTP: `PPSA77110` to `/data/homebrew/PPSA77110`.
 3. Put a game on the console, the folder that holds `index.html` (for MV, usually its `www` folder, or the folder
    above it):
-   - `/data/games/<Name>/` (internal), or
+   - `/data/outsider-ps5/<Name>/` (internal), or
    - `/mnt/usb0/games/<Name>/` or `/mnt/usb1/games/<Name>/` (USB).
 4. Mount and start the title with your title mounter (title id `PPSA77110`, "Outsider PS5"). A list of the games it found
    appears: D-pad to move, CROSS to choose. "Rescan" looks again, "Quit" leaves.
@@ -58,7 +58,7 @@ scripts/package.sh                        # dist/outsider-ps5-v<VERSION>.zip and
 
 - `scripts/build.sh` builds `build/PPSA77110` in the build image `outsider-ps5-dev` (a Dockerfile of its own is to do): `eboot.bin` is the game list (`launcher/`, the PS5 Vulkan Template's foundation, ImGui overlay),
   `outsider.bin` is Outsider (`runtime/`), `outsider/shims` its scripts.
-- The list scans `/data/games` and the USB `games` folders for MV and MZ folders, writes
+- The list scans `/data/outsider-ps5` and the USB `games` folders for MV and MZ folders, writes
   `/data/outsider-ps5/launch.txt` and starts `outsider.bin` through the shell (`sceSystemServiceLoadExec`). Without
   that file `outsider.bin` starts the game named in `/data/outsider-ps5/game`, else the first game folder found.
 - The log is `/data/outsider-ps5/last-run.log`.

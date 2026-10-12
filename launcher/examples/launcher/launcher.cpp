@@ -28,7 +28,7 @@ const char *const dataDir = "/data/outsider-ps5";
 const char *const program = "/app0/outsider.bin";
 const char *const shims = "/app0/outsider/shims";
 const char *const roots[] = {
-	"/data/games", "/mnt/usb0/games", "/mnt/usb1/games", "/mnt/usb2/games", "/mnt/usb3/games",
+	"/data/outsider-ps5", "/mnt/usb0/games", "/mnt/usb1/games", "/mnt/usb2/games", "/mnt/usb3/games",
 	"/mnt/usb4/games", "/mnt/usb5/games", "/mnt/usb6/games", "/mnt/usb7/games",
 };
 
@@ -170,7 +170,7 @@ public:
 		if (overlay->header("Games")) {
 			if (games.empty()) {
 				overlay->text("No games found.");
-				overlay->text("Put MV or MZ game folders in /data/games or in a games folder on a USB stick.");
+				overlay->text("Put MV or MZ game folders in /data/outsider-ps5 or in a games folder on a USB stick.");
 			}
 			for (const Game &game : games) {
 				if (overlay->button(game.name.c_str())) {

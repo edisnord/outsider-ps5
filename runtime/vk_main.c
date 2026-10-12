@@ -175,10 +175,10 @@ int main(void)
 				game[0] = '\0';
 			fclose(g);
 		}
-		if (!game[0] && !first_game("/data/games", game, sizeof game) &&
+		if (!game[0] && !first_game(OPS5_DATA_DIR, game, sizeof game) &&
 		    !first_game("/mnt/usb0/games", game, sizeof game) && !first_game("/mnt/usb1/games", game, sizeof game)) {
 			snprintf(line, sizeof line, "outsider-ps5: no game to start: no %s, no %s, no game folder in "
-			         "/data/games or the USB games folders\n", OPS5_LAUNCH, OPS5_GAME_FILE);
+			         "/data/outsider-ps5 or the USB games folders\n", OPS5_LAUNCH, OPS5_GAME_FILE);
 			ops5_log(line);
 			return 1;
 		}
