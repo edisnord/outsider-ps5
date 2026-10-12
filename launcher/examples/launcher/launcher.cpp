@@ -118,7 +118,10 @@ public:
 			message = "Cannot write " + launch;
 			return;
 		}
-		std::string args = "--game " + escaped(game.root) + " --shims " + shims + " --perf 120";
+		std::string args = "--game " + escaped(game.root) + " --shims " + shims;
+		/* Diagnostics are off unless the file diag exists, so a recording sees none of their cost */
+		if (exists(std::string(dataDir) + "/diag"))
+			args += " --perf 120";
 		if (exists(home + "/profile")) {
 			args += " --profile 5";
 		}

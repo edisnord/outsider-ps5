@@ -158,6 +158,7 @@ int main(void)
 
 	FILE *f = fopen(OPS5_LAUNCH, "r");
 	int ok = 0;
+	const int diag = access(OPS5_DATA_DIR "/diag", F_OK) == 0;
 	if (f) {
 		ok = read_line(f, home, sizeof home) == 0 && read_line(f, env, sizeof env) == 0 &&
 		     read_line(f, args, sizeof args) == 0;
@@ -185,7 +186,12 @@ int main(void)
 		escape_into(esc, sizeof esc, game);
 		snprintf(home, sizeof home, "%s/outsider", OPS5_DATA_DIR);
 		snprintf(env, sizeof env, "HOME=%s PS5PATH_CASE_INSENSITIVE=1", home);
-		snprintf(args, sizeof args, "--game %s --shims " OPS5_SHIMS " --perf 120", esc);
+		snprintf(args, sizeof args, "--game %s --shims " OPS5_SHIMS, esc);
+		/* Diagnostics are off unless asked for, so a recording sees none of their cost: a file named diag in the
+		   data folder turns on the per-120-frame perf line and SDL's GPU/video debug messages, profile adds the
+		   sampling profiler */
+		if (diag)
+			strncat(args, " --perf 120", sizeof args - strlen(args) - 1);
 		if (access(OPS5_DATA_DIR "/outsider/profile", F_OK) == 0)
 			strncat(args, " --profile 5", sizeof args - strlen(args) - 1);
 	}
@@ -195,7 +201,7 @@ int main(void)
 	ops5_log(line);
 
 	/* SDL's own messages about the GPU and the display (warnings are hidden by default), to the log */
-	setenv("SDL_LOGGING", "gpu=debug,video=debug,render=info,*=warn", 0);
+	setenv("SDL_LOGGING", diag ? "gpu=debug,video=debug,render=info,*=warn" : "*=error", 0);
 
 	char *words[64];
 	int n = split_escaped(env, words, 64);

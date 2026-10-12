@@ -27,6 +27,10 @@ Without the list's choice (for example if it never starts), Outsider starts the 
 **Logs.** `/data/outsider-ps5/last-run.log` is the log of the last run; copy it over FTP when reporting a problem. It
 includes a "compat" section naming plugins that failed and features a game asked for that are not there.
 
+**Diagnostics.** Off by default, so a recording does not pay for them. To turn on the per-120-frame perf lines (frame
+times, audio mixer statistics) and SDL's GPU and video messages, create an empty file `/data/outsider-ps5/diag`;
+delete it to turn them off again. A file `/data/outsider-ps5/outsider/profile` adds the sampling profiler.
+
 **Known limits.**
 - Early alpha: expect crashes and missing features. Tested with one game (Fear & Hunger 2: Termina, MV); occasional
   frame hitches of half a second or more happen at map and battle loads.
