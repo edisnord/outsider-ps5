@@ -46,15 +46,9 @@ scripts/package.sh                        # dist/outsider-ps5-v<VERSION>.zip and
 
 ## Releasing
 
-1. Set `VERSION` (and `OUTSIDER_REV` to the Outsider commit to ship), commit.
-2. `git tag v<VERSION> && git push --tags`.
-3. The `release` workflow (`.github/workflows/release.yml`) builds and publishes the zip as a pre-release. It runs on
-   a self-hosted Linux runner labelled `outsider-ps5` with Docker, the build image, and the JavaScriptCore build at the
-   path in the repository variable `JSC_OUT`; GitHub's hosted runners cannot build this. Set the secret
-   `OUTSIDER_TOKEN` if the Outsider repository is private. Run the workflow by hand to get the zip as an artifact
-   without a release.
-
-`ci.yml` only checks the scripts on every push.
+1. Set `VERSION` (and `OUTSIDER_REV` to the Outsider commit to ship), build as above, run `scripts/package.sh`.
+2. Tag `v<VERSION>`, push the tag and upload `dist/outsider-ps5-v<VERSION>.zip` and `dist/SHA256SUMS` to the release by hand.
+   The build needs the PS5 build image and a JavaScriptCore build, which is why there is no CI for it.
 
 ## State
 
