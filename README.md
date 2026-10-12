@@ -6,6 +6,56 @@ JavaScriptCore and the JIT) on SDL3's GPU API, drawing with RADV (Mesa's Vulkan 
 The Vulkan stack is [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan); the game list is built on
 [PS5_VulkanTemplate](https://github.com/mihawk-99/PS5_VulkanTemplate).
 
+## Install and use (v0.0.1, early alpha)
+
+You need a jailbroken PS5 that can run homebrew (an ELF loader and an FTP server such as ftpsrv on port 2121) and
+a way to mount a title folder (a title mounter). This package does not include a game.
+
+1. Download `outsider-ps5-v0.0.1.zip` from the Releases page and unpack it. It holds one folder, `PPSA77110`.
+2. Copy the folder to the console, for example with FTP: `PPSA77110` to `/data/homebrew/PPSA77110`.
+3. Put a game on the console, the folder that holds `index.html` (for MV, usually its `www` folder, or the folder
+   above it):
+   - `/data/games/<Name>/` (internal), or
+   - `/mnt/usb0/games/<Name>/` or `/mnt/usb1/games/<Name>/` (USB).
+4. Mount and start the title with your title mounter (title id `PPSA77110`, "Outsider PS5"). A list of the games it found
+   appears: D-pad to move, CROSS to choose. "Rescan" looks again, "Quit" leaves.
+5. The chosen game starts in Outsider.
+
+Without the list's choice (for example if it never starts), Outsider starts the game named in the first line of
+`/data/outsider-ps5/game`, otherwise the first game folder it finds.
+
+**Logs.** `/data/outsider-ps5/last-run.log` is the log of the last run; copy it over FTP when reporting a problem. It
+includes a "compat" section naming plugins that failed and features a game asked for that are not there.
+
+**Known limits.**
+- Early alpha: expect crashes and missing features. Tested with one game (Fear & Hunger 2: Termina, MV); occasional
+  frame hitches of half a second or more happen at map and battle loads.
+- Only MV and MZ games. Plugins that need WebGL (for example UltraMode7) fail to load.
+- Games are not included and nothing is converted: bring your own, legally obtained copy.
+
+## Building
+
+`scripts/build.sh` needs the build image (below) and, next to this repository, a checkout of the
+[Outsider fork](https://github.com/edisnord/outsider) at the revision in `OUTSIDER_REV`, plus a JavaScriptCore build
+(`JSC_OUT`, default `build/jsc/out`). Then:
+
+```
+scripts/build.sh outsider link launcher   # build/PPSA77110
+scripts/package.sh                        # dist/outsider-ps5-v<VERSION>.zip and SHA256SUMS
+```
+
+## Releasing
+
+1. Set `VERSION` (and `OUTSIDER_REV` to the Outsider commit to ship), commit.
+2. `git tag v<VERSION> && git push --tags`.
+3. The `release` workflow (`.github/workflows/release.yml`) builds and publishes the zip as a pre-release. It runs on
+   a self-hosted Linux runner labelled `outsider-ps5` with Docker, the build image, and the JavaScriptCore build at the
+   path in the repository variable `JSC_OUT`; GitHub's hosted runners cannot build this. Set the secret
+   `OUTSIDER_TOKEN` if the Outsider repository is private. Run the workflow by hand to get the zip as an artifact
+   without a release.
+
+`ci.yml` only checks the scripts on every push.
+
 ## State
 
 - `scripts/build.sh` builds `build/PPSA77110` in the build image `outsider-ps5-dev` (a Dockerfile of its own is to do): `eboot.bin` is the game list (`launcher/`, the PS5 Vulkan Template's foundation, ImGui overlay),
