@@ -1,0 +1,810 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 the PS5 port contributors */
+/* Relative path shim for PS5 homebrew.
+ *
+ * On PS5 firmware 13.60 a program started through the websrv launcher can only use absolute file
+ * paths: open("Game.ini"), stat("Data/x") and so on fail with EINVAL, even after chdir() (getcwd()
+ * and chdir() with absolute paths work fine, and calling sys_set_budget(0) does not help). Most
+ * software is written with relative paths, so wrap the libc functions that take a path: when the
+ * path is relative, prefix it with the current directory first.
+ *
+ * Link this file into the program and add the matching -Wl,--wrap=... options (see WRAPPED below,
+ * and scripts/build-mkxp.sh for an example). Functions called from inside libc itself, or from
+ * shared libraries loaded with dlopen, are not affected.
+ *
+ * It can also make file names case-insensitive (PS5PATH_CASE_INSENSITIVE=1), see below.
+ *
+ * Built with -DPS5PATH_NATIVE it goes into the native title (native/title-link.sh) instead, together with
+ * native/runtime.c: there chdir() reports the new directory to the runtime (getcwd() does not work in a
+ * title), readlink() and realpath() do not reach libc's raw system calls, and opendir() also works on
+ * folders the title sandbox refuses to open as directories (see "directories" below).
+ *
+ * Copyright (C) 2026 the easyrpg-ps5 authors. GPLv3 or later.
+ */
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifdef PS5PATH_NATIVE
+#include "runtime.h"
+#endif
+
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
+
+#define SHIM_PATH_MAX 4096
+
+/* Returns `path` unchanged if it is NULL, empty or absolute; otherwise "<cwd>/<path>" in `buf`. */
+static const char* absolute(const char* path, char* buf) {
+	if (!path || path[0] == '/' || path[0] == '\0') {
+		return path;
+	}
+	if (!getcwd(buf, SHIM_PATH_MAX / 2)) {
+		return path;
+	}
+	size_t len = strlen(buf);
+	if (len == 0 || buf[len - 1] != '/') {
+		buf[len++] = '/';
+	}
+	strncpy(buf + len, path, SHIM_PATH_MAX - len - 1);
+	buf[SHIM_PATH_MAX - 1] = '\0';
+	return buf;
+}
+
+/* --- case-insensitive fallback ---------------------------------------------------------------------
+ *
+ * Games made on Windows often ask for "IconSet.png" while the file is called "iconSet.png": Windows does not
+ * care, the console's file system does. When PS5PATH_CASE_INSENSITIVE=1 is set in the environment, an open,
+ * stat, access or opendir that fails with ENOENT is retried once with every path component that does not
+ * exist as spelled replaced by the directory entry that matches it ignoring case. Nothing changes for names
+ * that exist as spelled, and files that really do not exist stay missing. Corrections that were found are
+ * remembered, so a directory is only scanned once per name. */
+DIR* __real_opendir(const char* path);
+int __real_lstat(const char* path, struct stat* st);
+static DIR* open_dir(const char* path);
+
+static int ci_enabled = -1;
+static int ci_on(void) {
+#ifdef PS5PATH_NATIVE
+	/* In the native title the launcher runs first in the same program, and sets the variable only for the
+	 * engine that needs it: look every time */
+	ci_enabled = -1;
+#endif
+	if (ci_enabled < 0) {
+		const char* e = getenv("PS5PATH_CASE_INSENSITIVE");
+		ci_enabled = (e && *e && *e != '0') ? 1 : 0;
+	}
+	return ci_enabled;
+}
+
+#define CI_CACHE_SIZE 1024
+static struct { char* from; char* to; } ci_cache[CI_CACHE_SIZE];
+static pthread_mutex_t ci_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned ci_hash(const char* s) {
+	unsigned h = 2166136261u;
+	while (*s) {
+		h = (h ^ (unsigned char)*s++) * 16777619u;
+	}
+	return h % CI_CACHE_SIZE;
+}
+
+/* Finds the entry of `dir` (absolute, "" for the root) that equals `name` ignoring case. */
+static int ci_find(const char* dir, const char* name, char* out, size_t out_size) {
+	DIR* d = open_dir(dir[0] ? dir : "/");
+	if (!d) {
+		return 0;
+	}
+	int found = 0;
+	struct dirent* e;
+	while ((e = readdir(d)) != NULL) {
+		if (strcasecmp(e->d_name, name) == 0) {
+			strncpy(out, e->d_name, out_size - 1);
+			out[out_size - 1] = '\0';
+			found = 1;
+			break;
+		}
+	}
+	closedir(d);
+	return found;
+}
+
+/* Returns `path` itself when it needs no correction (or the feature is off), else the corrected path in `buf`.
+ * Components after the first one that cannot be found are kept as they are, so creating a new file in an
+ * existing directory keeps the requested file name. */
+static const char* fix_case(const char* path, char* buf) {
+	if (!path || path[0] != '/' || !ci_on()) {
+		return path;
+	}
+	unsigned slot = ci_hash(path);
+	pthread_mutex_lock(&ci_lock);
+	if (ci_cache[slot].from && strcmp(ci_cache[slot].from, path) == 0) {
+		strncpy(buf, ci_cache[slot].to, SHIM_PATH_MAX - 1);
+		buf[SHIM_PATH_MAX - 1] = '\0';
+		pthread_mutex_unlock(&ci_lock);
+		return buf;
+	}
+	pthread_mutex_unlock(&ci_lock);
+
+	size_t len = 0;
+	int changed = 0, missing = 0;
+	const char* p = path;
+	buf[0] = '\0';
+	while (*p) {
+		while (*p == '/') {
+			p++;
+		}
+		if (!*p) {
+			break;
+		}
+		const char* end = strchr(p, '/');
+		size_t clen = end ? (size_t)(end - p) : strlen(p);
+		char comp[256];
+		if (clen >= sizeof(comp) || len + 1 + clen + 1 >= SHIM_PATH_MAX) {
+			return path;
+		}
+		memcpy(comp, p, clen);
+		comp[clen] = '\0';
+		if (!missing) {
+			struct stat st;
+			buf[len] = '/';
+			memcpy(buf + len + 1, comp, clen + 1);
+			if (__real_lstat(buf, &st) != 0) {
+				char found[256];
+				buf[len] = '\0';
+				if (ci_find(buf, comp, found, sizeof(found))) {
+					changed = 1;
+					clen = strlen(found);
+					memcpy(comp, found, clen + 1);
+				} else {
+					missing = 1;
+				}
+			}
+		}
+		buf[len] = '/';
+		memcpy(buf + len + 1, comp, clen + 1);
+		len += 1 + clen;
+		p += end ? (size_t)(end - p) : strlen(p);
+	}
+	if (!changed) {
+		return path;
+	}
+	pthread_mutex_lock(&ci_lock);
+	free(ci_cache[slot].from);
+	free(ci_cache[slot].to);
+	ci_cache[slot].from = strdup(path);
+	ci_cache[slot].to = strdup(buf);
+	pthread_mutex_unlock(&ci_lock);
+	return buf;
+}
+
+#define ABS(p) char p##_buf[SHIM_PATH_MAX]; p = absolute(p, p##_buf)
+/* Same, for the *at() functions: only relative to the current directory when dirfd == AT_FDCWD. */
+#define ABS_AT(fd, p) char p##_buf[SHIM_PATH_MAX]; if ((fd) == AT_FDCWD) p = absolute(p, p##_buf)
+
+/* --- open family --- */
+int __real_open(const char* path, int flags, ...);
+int __wrap_open(const char* path, int flags, ...) {
+	mode_t mode = 0;
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, flags);
+		mode = (mode_t)va_arg(ap, int);
+		va_end(ap);
+	}
+	ABS(path);
+	int fd = __real_open(path, flags, mode);
+	if (fd < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			fd = __real_open(fixed, flags, mode);
+		}
+	}
+	return fd;
+}
+
+int __real_openat(int fd, const char* path, int flags, ...);
+int __wrap_openat(int fd, const char* path, int flags, ...) {
+	mode_t mode = 0;
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, flags);
+		mode = (mode_t)va_arg(ap, int);
+		va_end(ap);
+	}
+	ABS_AT(fd, path);
+	int r = __real_openat(fd, path, flags, mode);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_openat(fd, fixed, flags, mode);
+		}
+	}
+	return r;
+}
+
+FILE* __real_fopen(const char* path, const char* mode);
+FILE* __wrap_fopen(const char* path, const char* mode) {
+	ABS(path);
+	FILE* f = __real_fopen(path, mode);
+	if (!f && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			f = __real_fopen(fixed, mode);
+		}
+	}
+	return f;
+}
+
+FILE* __real_freopen(const char* path, const char* mode, FILE* stream);
+FILE* __wrap_freopen(const char* path, const char* mode, FILE* stream) {
+	ABS(path);
+	return __real_freopen(path, mode, stream);
+}
+
+/* --- stat family --- */
+int __real_stat(const char* path, struct stat* st);
+int __wrap_stat(const char* path, struct stat* st) {
+	ABS(path);
+	int r = __real_stat(path, st);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_stat(fixed, st);
+		}
+	}
+	return r;
+}
+
+int __real_lstat(const char* path, struct stat* st);
+int __wrap_lstat(const char* path, struct stat* st) {
+	ABS(path);
+	int r = __real_lstat(path, st);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_lstat(fixed, st);
+		}
+	}
+	return r;
+}
+
+int __real_fstatat(int fd, const char* path, struct stat* st, int flag);
+int __wrap_fstatat(int fd, const char* path, struct stat* st, int flag) {
+	ABS_AT(fd, path);
+	int r = __real_fstatat(fd, path, st, flag);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_fstatat(fd, fixed, st, flag);
+		}
+	}
+	return r;
+}
+
+int __real_access(const char* path, int mode);
+int __wrap_access(const char* path, int mode) {
+	ABS(path);
+	int r = __real_access(path, mode);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_access(fixed, mode);
+		}
+	}
+#ifdef PS5PATH_NATIVE
+	/* A native title is refused access() for every path (PS5_VulkanTemplate's porting notes): answer from
+	 * stat(), which works, by whether the file is there (the title can read whatever it can see) */
+	if (r < 0 && errno != ENOENT && errno != ENOTDIR) {
+		struct stat st;
+		r = __wrap_stat(path, &st) == 0 ? 0 : -1;
+	}
+#endif
+	return r;
+}
+
+int __real_faccessat(int fd, const char* path, int mode, int flag);
+int __wrap_faccessat(int fd, const char* path, int mode, int flag) {
+	ABS_AT(fd, path);
+	int r = __real_faccessat(fd, path, mode, flag);
+	if (r < 0 && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_faccessat(fd, fixed, mode, flag);
+		}
+	}
+	return r;
+}
+
+/* --- directories --- */
+
+#ifdef PS5PATH_NATIVE
+/* In a native title opendir() fails with EPERM on /app0 and /data (it opens the folder with O_DIRECTORY),
+ * although open(), stat() and mkdir() on the same path work (found with the mkxp PS5 port). EasyRPG Player,
+ * PhysFS (mkxp-z) and the launcher cannot do without listing folders, so when that happens the folder is
+ * opened as a plain file and read with sceKernelGetdents() instead. The DIR* handed out then is one of ours;
+ * readdir(), closedir() and the rest are wrapped too, and pass every other DIR* on to libc. */
+int sceKernelGetdents(int fd, char* buf, int nbytes);
+int __real_open(const char* path, int flags, ...);
+int __real_closedir(DIR* d);
+struct dirent* __real_readdir(DIR* d);
+int __real_readdir_r(DIR* d, struct dirent* entry, struct dirent** result);
+void __real_rewinddir(DIR* d);
+int __real_dirfd(DIR* d);
+long __real_telldir(DIR* d);
+void __real_seekdir(DIR* d, long loc);
+
+typedef struct NativeDir {
+	struct NativeDir* next;
+	int fd;
+	int pos, len; /* the unread part of buf */
+	long index;   /* entries returned so far (telldir) */
+	char buf[65536]; /* title folders refuse smaller reads (EINVAL; PS5_vkQuake's ps5_directory.cpp) */
+	struct dirent entry;
+} NativeDir;
+
+static NativeDir* native_dirs;
+static pthread_mutex_t native_dirs_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static NativeDir* native_find(DIR* d) {
+	pthread_mutex_lock(&native_dirs_lock);
+	NativeDir* n = native_dirs;
+	while (n && (DIR*)n != d) {
+		n = n->next;
+	}
+	pthread_mutex_unlock(&native_dirs_lock);
+	return n;
+}
+
+/* Says once per kind of event what happened, so that the log shows whether the fallback is needed and works */
+static void native_note(int* said, const char* what, const char* path, int err) {
+	if (*said) {
+		return;
+	}
+	*said = 1;
+	char line[600];
+	snprintf(line, sizeof line, "ps5path: %s (first time: %s, errno %d)\n", what, path, err);
+	ops5_log(line); /* native/runtime.c: the log file, the kernel log and UDP */
+}
+
+static DIR* native_opendir(const char* path) {
+	static int said_used, said_failed;
+	/* As PS5_vkQuake's ps5_directory.cpp lists title folders: O_DIRECTORY, then getdents in 64 KiB reads */
+	int fd = __real_open(path, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) {
+		fd = __real_open(path, O_RDONLY);
+	}
+	if (fd < 0) {
+		native_note(&said_failed, "opendir fallback cannot open the folder", path, errno);
+		errno = EPERM;
+		return NULL;
+	}
+	struct stat st;
+	if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+		close(fd);
+		errno = ENOTDIR;
+		return NULL;
+	}
+	NativeDir* n = calloc(1, sizeof *n);
+	if (!n) {
+		close(fd);
+		errno = ENOMEM;
+		return NULL;
+	}
+	n->fd = fd;
+	/* Read the first block now: if the kernel refuses that too, say so here and not in readdir() */
+	n->len = sceKernelGetdents(fd, n->buf, sizeof n->buf);
+	if (n->len < 0) {
+		native_note(&said_failed, "opendir fallback: sceKernelGetdents failed", path, n->len & 0xffff);
+		close(fd);
+		free(n);
+		errno = EPERM;
+		return NULL;
+	}
+	native_note(&said_used, "opendir refused, listing with sceKernelGetdents instead", path, EPERM);
+	pthread_mutex_lock(&native_dirs_lock);
+	n->next = native_dirs;
+	native_dirs = n;
+	pthread_mutex_unlock(&native_dirs_lock);
+	return (DIR*)n;
+}
+
+static struct dirent* native_readdir(NativeDir* n) {
+	for (;;) {
+		if (n->pos >= n->len) {
+			if (n->len == 0) {
+				return NULL;
+			}
+			n->len = sceKernelGetdents(n->fd, n->buf, sizeof n->buf);
+			n->pos = 0;
+			if (n->len <= 0) {
+				n->len = 0;
+				return NULL;
+			}
+		}
+		/* The kernel's records have the layout of the SDK's struct dirent (FreeBSD 11) */
+		const struct dirent* rec = (const struct dirent*)(n->buf + n->pos);
+		if (rec->d_reclen == 0 || n->pos + rec->d_reclen > n->len) {
+			n->len = 0;
+			return NULL;
+		}
+		n->pos += rec->d_reclen;
+		if (rec->d_fileno == 0) {
+			continue; /* a deleted entry */
+		}
+		memcpy(&n->entry, rec, rec->d_reclen < sizeof n->entry ? rec->d_reclen : sizeof n->entry);
+		n->entry.d_name[sizeof n->entry.d_name - 1] = '\0';
+		n->index++;
+		return &n->entry;
+	}
+}
+
+static void native_rewind(NativeDir* n) {
+	lseek(n->fd, 0, SEEK_SET);
+	n->pos = 0;
+	n->len = sceKernelGetdents(n->fd, n->buf, sizeof n->buf);
+	if (n->len < 0) {
+		n->len = 0;
+	}
+	n->index = 0;
+}
+
+struct dirent* __wrap_readdir(DIR* d) {
+	NativeDir* n = native_find(d);
+	return n ? native_readdir(n) : __real_readdir(d);
+}
+
+int __wrap_readdir_r(DIR* d, struct dirent* entry, struct dirent** result) {
+	NativeDir* n = native_find(d);
+	if (!n) {
+		return __real_readdir_r(d, entry, result);
+	}
+	struct dirent* e = native_readdir(n);
+	if (e) {
+		memcpy(entry, e, sizeof *entry);
+	}
+	*result = e ? entry : NULL;
+	return 0;
+}
+
+int __wrap_closedir(DIR* d) {
+	NativeDir* n = native_find(d);
+	if (!n) {
+		return __real_closedir(d);
+	}
+	pthread_mutex_lock(&native_dirs_lock);
+	NativeDir** p = &native_dirs;
+	while (*p && *p != n) {
+		p = &(*p)->next;
+	}
+	if (*p) {
+		*p = n->next;
+	}
+	pthread_mutex_unlock(&native_dirs_lock);
+	int r = close(n->fd);
+	free(n);
+	return r;
+}
+
+void __wrap_rewinddir(DIR* d) {
+	NativeDir* n = native_find(d);
+	if (n) {
+		native_rewind(n);
+	} else {
+		__real_rewinddir(d);
+	}
+}
+
+int __wrap_dirfd(DIR* d) {
+	NativeDir* n = native_find(d);
+	return n ? n->fd : __real_dirfd(d);
+}
+
+long __wrap_telldir(DIR* d) {
+	NativeDir* n = native_find(d);
+	return n ? n->index : __real_telldir(d);
+}
+
+void __wrap_seekdir(DIR* d, long loc) {
+	NativeDir* n = native_find(d);
+	if (!n) {
+		__real_seekdir(d, loc);
+		return;
+	}
+	native_rewind(n);
+	while (n->index < loc && native_readdir(n)) {
+	}
+}
+#endif
+
+/* opendir() with the native title's fallback */
+static DIR* open_dir(const char* path) {
+	DIR* d = __real_opendir(path);
+#if defined(PS5PATH_NATIVE) && !defined(PS5PATH_PLATFORM_DIRS)
+	if (!d && errno == EPERM) {
+		d = native_opendir(path);
+	}
+#endif
+	return d;
+}
+
+DIR* __wrap_opendir(const char* path) {
+	ABS(path);
+	DIR* d = open_dir(path);
+	if (!d && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			d = open_dir(fixed);
+		}
+	}
+	return d;
+}
+
+int __real_mkdir(const char* path, mode_t mode);
+int __wrap_mkdir(const char* path, mode_t mode) {
+	ABS(path);
+	return __real_mkdir(path, mode);
+}
+
+int __real_mkdirat(int fd, const char* path, mode_t mode);
+int __wrap_mkdirat(int fd, const char* path, mode_t mode) {
+	ABS_AT(fd, path);
+	return __real_mkdirat(fd, path, mode);
+}
+
+int __real_rmdir(const char* path);
+int __wrap_rmdir(const char* path) {
+	ABS(path);
+	return __real_rmdir(path);
+}
+
+int __real_chdir(const char* path);
+int __wrap_chdir(const char* path) {
+	ABS(path);
+	int r = __real_chdir(path);
+#ifdef PS5PATH_NATIVE
+	/* chdir() can be refused in a title (outsider-vk.bin's start). Every path that goes through here is made
+	 * absolute against the directory tracked by native/runtime.c, so tracking it is what matters. */
+	struct stat st;
+	if (r != 0 && path && path[0] == '/' && __wrap_stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		r = 0;
+	}
+	if (r == 0) {
+		ops5_set_cwd(path);
+	}
+#endif
+	return r;
+}
+
+/* --- removing, renaming, links --- */
+int __real_unlink(const char* path);
+int __wrap_unlink(const char* path) {
+	ABS(path);
+	return __real_unlink(path);
+}
+
+int __real_unlinkat(int fd, const char* path, int flag);
+int __wrap_unlinkat(int fd, const char* path, int flag) {
+	ABS_AT(fd, path);
+	return __real_unlinkat(fd, path, flag);
+}
+
+int __real_rename(const char* from, const char* to);
+int __wrap_rename(const char* from, const char* to) {
+	ABS(from);
+	ABS(to);
+	return __real_rename(from, to);
+}
+
+ssize_t __real_readlink(const char* path, char* buf, size_t size);
+ssize_t __wrap_readlink(const char* path, char* buf, size_t size) {
+	ABS(path);
+#ifdef PS5PATH_NATIVE
+	/* libc's readlink() is a raw system call, which a title may not make; there are no links to read */
+	(void)path;
+	(void)buf;
+	(void)size;
+	errno = EINVAL;
+	return -1;
+#else
+	return __real_readlink(path, buf, size);
+#endif
+}
+
+#ifdef PS5PATH_NATIVE
+/* libc's realpath() asks the kernel through readlink() and getcwd(), neither of which works in a title.
+ * Without links, the real path is the absolute path with "." and ".." resolved; it has to exist. */
+static char* plain_realpath(const char* path, char* resolved) {
+	char out[SHIM_PATH_MAX];
+	size_t len = 0;
+	const char* p = path;
+	while (*p) {
+		while (*p == '/') {
+			p++;
+		}
+		size_t n = strcspn(p, "/");
+		if (n == 0) {
+			break;
+		}
+		if (n == 1 && p[0] == '.') {
+		} else if (n == 2 && p[0] == '.' && p[1] == '.') {
+			while (len > 0 && out[len - 1] != '/') {
+				len--;
+			}
+			if (len > 0) {
+				len--;
+			}
+		} else {
+			if (len + 1 + n >= sizeof out) {
+				errno = ENAMETOOLONG;
+				return NULL;
+			}
+			out[len++] = '/';
+			memcpy(out + len, p, n);
+			len += n;
+		}
+		p += n;
+	}
+	if (len == 0) {
+		out[len++] = '/';
+	}
+	out[len] = '\0';
+	struct stat st;
+	if (__real_lstat(out, &st) != 0) {
+		return NULL;
+	}
+	if (!resolved) {
+		return strdup(out);
+	}
+	memcpy(resolved, out, len + 1); /* callers pass PATH_MAX bytes */
+	return resolved;
+}
+#define __real_realpath plain_realpath
+#else
+char* __real_realpath(const char* path, char* resolved);
+#endif
+char* __wrap_realpath(const char* path, char* resolved) {
+	ABS(path);
+	char* r = __real_realpath(path, resolved);
+	if (!r && errno == ENOENT) {
+		char ci[SHIM_PATH_MAX];
+		const char* fixed = fix_case(path, ci);
+		if (fixed != path) {
+			r = __real_realpath(fixed, resolved);
+		}
+	}
+	return r;
+}
+
+int __real_symlink(const char* target, const char* path);
+int __wrap_symlink(const char* target, const char* path) {
+	ABS(path);
+	return __real_symlink(target, path);
+}
+
+/* --- attributes --- */
+int __real_chmod(const char* path, mode_t mode);
+int __wrap_chmod(const char* path, mode_t mode) {
+	ABS(path);
+	return __real_chmod(path, mode);
+}
+
+int __real_truncate(const char* path, off_t length);
+int __wrap_truncate(const char* path, off_t length) {
+	ABS(path);
+	return __real_truncate(path, length);
+}
+
+int __real_utimes(const char* path, const struct timeval* times);
+int __wrap_utimes(const char* path, const struct timeval* times) {
+	ABS(path);
+	return __real_utimes(path, times);
+}
+
+/* --- time ---
+ * The console's localtime_r() / gmtime_r() fill in the date and time but leave tm_gmtoff and tm_zone (which the SDK's
+ * struct tm has, as on FreeBSD) holding whatever was in memory. Ruby reads tm_gmtoff for leap seconds and time zones,
+ * so Time#hour gave 25 or recursed until "stack level too deep". Fill them in: gmtime_r is computed here, and for
+ * localtime_r the offset is the difference between the local fields and UTC. */
+#include <time.h>
+
+static long long days_from_civil(long long y, int m, int d) {
+	y -= m <= 2;
+	long long era = (y >= 0 ? y : y - 399) / 400;
+	long long yoe = y - era * 400;
+	long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+	long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + doe - 719468;
+}
+
+static long long tm_to_seconds(const struct tm* tm) {
+	/* normalise the month first, as timegm does */
+	long long year = tm->tm_year + 1900LL, mon = tm->tm_mon;
+	year += mon / 12;
+	mon %= 12;
+	if (mon < 0) { mon += 12; year--; }
+	return days_from_civil(year, (int)mon + 1, 1) * 86400 + (tm->tm_mday - 1) * 86400LL + tm->tm_hour * 3600LL +
+	       tm->tm_min * 60LL + tm->tm_sec;
+}
+
+static void seconds_to_tm(long long s, struct tm* tm) {
+	long long days = s / 86400, rem = s % 86400;
+	if (rem < 0) { rem += 86400; days--; }
+	tm->tm_hour = (int)(rem / 3600);
+	tm->tm_min = (int)(rem % 3600 / 60);
+	tm->tm_sec = (int)(rem % 60);
+	tm->tm_wday = (int)(((days % 7) + 7 + 4) % 7); /* 1 January 1970 was a Thursday */
+	/* civil from days (Howard Hinnant's algorithm) */
+	long long z = days + 719468;
+	long long era = (z >= 0 ? z : z - 146096) / 146097;
+	long long doe = z - era * 146097;
+	long long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	long long y = yoe + era * 400;
+	long long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	long long mp = (5 * doy + 2) / 153;
+	int d = (int)(doy - (153 * mp + 2) / 5 + 1);
+	int m = (int)(mp < 10 ? mp + 3 : mp - 9);
+	y += m <= 2;
+	tm->tm_year = (int)(y - 1900);
+	tm->tm_mon = m - 1;
+	tm->tm_mday = d;
+	tm->tm_yday = (int)(days - days_from_civil(y, 1, 1));
+	tm->tm_isdst = 0;
+	tm->tm_gmtoff = 0;
+	tm->tm_zone = (char*)"UTC";
+}
+
+struct tm* __wrap_gmtime_r(const time_t* t, struct tm* tm) {
+	if (!t || !tm) return NULL;
+	seconds_to_tm((long long)*t, tm);
+	return tm;
+}
+
+struct tm* __wrap_gmtime(const time_t* t) {
+	static __thread struct tm buf;
+	return __wrap_gmtime_r(t, &buf);
+}
+
+struct tm* __real_localtime_r(const time_t* t, struct tm* tm);
+struct tm* __wrap_localtime_r(const time_t* t, struct tm* tm) {
+	if (!t || !tm) return NULL;
+	struct tm* r = __real_localtime_r(t, tm);
+	if (!r) { /* no time zone information: use UTC */
+		seconds_to_tm((long long)*t, tm);
+		return tm;
+	}
+	long off = (long)(tm_to_seconds(r) - (long long)*t);
+	if (off > 18 * 3600 || off < -18 * 3600) { /* nonsense: use UTC */
+		seconds_to_tm((long long)*t, tm);
+		return tm;
+	}
+	r->tm_gmtoff = off;
+	r->tm_zone = (char*)(off ? "LOC" : "UTC");
+	return r;
+}
+
+struct tm* __wrap_localtime(const time_t* t) {
+	static __thread struct tm buf;
+	return __wrap_localtime_r(t, &buf);
+}
