@@ -2,11 +2,14 @@
 # Builds the title inside the build image, with this repository at /src, the Outsider checkout at /outsider and
 # JavaScriptCore's build at /jsc (see build.sh).
 #
-#   build-in-container.sh [outsider] [link] [launcher]
+#   build-in-container.sh [outsider] [link] [launcher] [zink] [zink-smoke]
 #
 #   outsider   Outsider and SoLoud for the PS5 (CMake, RMMZ_PS5_VULKAN, JavaScriptCore): build/obj/liboutsider.a
 #   link       outsider.bin, the program a game runs in (scripts/link-title.sh), in the title folder build/PPSA77110, and the shims
 #   launcher   eboot.bin, the game list (launcher/, the PS5 Vulkan Template): the title folder's program, sce_sys, libc.prx
+#   zink       Mesa's Zink (OpenGL on Vulkan) and RADV from PS5_Mesa with zink/ps5-mesa-zink.patch (scripts/build-zink.sh):
+#              build/zink. Not built by default: it needs network and LLVM 19 in the image
+#   zink-smoke zink-smoke.bin, OpenGL on Zink for the game list's "Zink test" (scripts/link-zink-smoke.sh)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -82,6 +85,13 @@ for step in "${STEPS[@]}"; do
             cp -a "$REPO/licenses/." "$TITLE/licenses/"
             cp "$REPO/LICENSE" "$REPO/LEGAL.md" "$REPO/THIRD-PARTY-NOTICES.md" "$TITLE/"
             echo "title ready: $TITLE"
+            ;;
+        zink)
+            bash "$REPO/scripts/build-zink.sh" "$REPO/build/zink"
+            ;;
+        zink-smoke)
+            [ -f "$REPO/build/zink/PROVENANCE.txt" ] || { echo "no Zink in build/zink (step zink)" >&2; exit 2; }
+            bash "$REPO/scripts/link-zink-smoke.sh" "$TITLE" "$REPO/build/zink"
             ;;
         *) echo "unknown step $step" >&2; exit 2 ;;
     esac

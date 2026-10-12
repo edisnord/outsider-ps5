@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the title in the build image.
 #
-#   scripts/build.sh [outsider] [link]
+#   scripts/build.sh [outsider] [link] [launcher] [zink] [zink-smoke]   (steps: build-in-container.sh)
 #
 # Environment:
 #   IMAGE          the build image (default outsider-ps5-dev: PS5 SDK, PS5_Vulkan with RADV and SDL3, SoLoud)

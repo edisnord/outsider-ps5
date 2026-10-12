@@ -19,6 +19,8 @@ REV="$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 OUTSIDER_REV="$(tr -d '[:space:]' < "$REPO/OUTSIDER_REV")"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 cp -a "$SRC" "$STAGE/$TITLE_ID"
+# The Zink smoke test (build steps zink, zink-smoke) is a developer probe: left out unless asked for
+[ "${INCLUDE_ZINK_SMOKE:-0}" = 1 ] || rm -f "$STAGE/$TITLE_ID/zink-smoke.bin"
 cat > "$STAGE/$TITLE_ID/VERSION.txt" <<TXT
 Outsider PS5 v$VERSION (early alpha)
 outsider-ps5 revision: $REV

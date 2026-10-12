@@ -26,6 +26,8 @@ namespace {
 
 const char *const dataDir = "/data/outsider-ps5";
 const char *const program = "/app0/outsider.bin";
+// Built only with the zink-smoke build step: OpenGL on Zink (zink/zink_smoke.c), which comes back to this list
+const char *const zinkSmoke = "/app0/zink-smoke.bin";
 const char *const shims = "/app0/outsider/shims";
 const char *const roots[] = {
 	"/data/outsider-ps5", "/mnt/usb0/games", "/mnt/usb1/games", "/mnt/usb2/games", "/mnt/usb3/games",
@@ -140,6 +142,20 @@ public:
 		message = "The console refused to start " + std::string(program);
 	}
 
+	// Starts the Zink smoke test. Returns only when that failed.
+	void startZinkSmoke()
+	{
+		mkdir(dataDir, 0777); // its log goes there
+		fflush(nullptr);
+		static const char *const noArgs[] = { nullptr };
+		if (sceSystemServiceLoadExec(zinkSmoke, noArgs) >= 0) {
+			for (;;) {
+				usleep(100000);
+			}
+		}
+		message = "The console refused to start " + std::string(zinkSmoke);
+	}
+
 	void buildCommandBuffer()
 	{
 		VkCommandBuffer cmdBuffer = drawCmdBuffers[currentBuffer];
@@ -180,6 +196,9 @@ public:
 		}
 		if (!message.empty()) {
 			overlay->text("%s", message.c_str());
+		}
+		if (exists(zinkSmoke) && overlay->button("Zink test")) {
+			startZinkSmoke();
 		}
 		if (overlay->button("Rescan")) {
 			games = findGames();

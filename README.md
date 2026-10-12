@@ -63,6 +63,12 @@ scripts/package.sh                        # dist/outsider-ps5-v<VERSION>.zip and
   that file `outsider.bin` starts the game named in `/data/outsider-ps5/game`, else the first game folder found.
 - The log is `/data/outsider-ps5/last-run.log`.
 
+## Zink (probe)
+
+`zink/` builds Mesa's Zink (OpenGL on the same RADV) and a smoke test, `zink-smoke.bin`, started from the game list's
+"Zink test" button: the first step towards running plugins that need WebGL. It is not in releases. See
+[zink/README.md](zink/README.md).
+
 ## Planned
 
 An own build image and JavaScriptCore build script; a prettier list (the template's UI kit is GPL-3.0 and could be used).

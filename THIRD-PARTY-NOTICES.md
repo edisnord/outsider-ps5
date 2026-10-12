@@ -12,6 +12,7 @@ each part are in `licenses/third-party/`, and are copied into the title folder (
 | Dear ImGui, stb, volk, tinygltf, KTX, GLM, Vulkan headers (in `launcher/external/`) | the launcher | MIT / Apache-2.0 / zlib (see their folders) |
 | Roboto Medium | the launcher's font | Apache-2.0 |
 | [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (RADV, Mesa) | the Vulkan driver, linked in | GPL-3.0 (PS5_Vulkan), MIT (Mesa) |
+| [XashPS5](https://github.com/GordonProsperoMan/xash3d-ps5)'s Mesa patch (`zink/ps5-mesa-zink.patch`) | Zink on RADV and its EGL, only in the optional `zink-smoke.bin` probe | GPL-3.0-or-later (XashPS5), MIT (`ps5_zink_egl.c`, Mesa) |
 | [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK) | the SDK and the platform layer, linked in | GPL-3.0 |
 | SDL3 | window, input, audio | zlib |
 | SoLoud | audio | zlib |
