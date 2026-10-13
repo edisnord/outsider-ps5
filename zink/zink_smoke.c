@@ -37,16 +37,6 @@ typedef void(APIENTRYP PFNGLDRAWARRAYSPROC)(GLenum mode, GLint first, GLsizei co
 int sceSystemServiceLoadExec(const char *path, const char *const *argv);
 int sceKernelDebugOutText(int channel, const char *text);
 
-/* ps5_zink_egl.c sends Mesa's stderr to klog with this, from the newer payload SDK forks' platform layer. This
-   no-op lets the program link with an SDK without it; it can also shadow the platform's (an archive member is not
-   pulled in for a name already defined), and Mesa's own messages are then not in klog. Drop it once the image's SDK
-   is known to have the function. */
-__attribute__((weak)) int ps5_klog_capture_stderr(const char *prefix)
-{
-	(void)prefix;
-	return 0;
-}
-
 static FILE *logFile;
 
 static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

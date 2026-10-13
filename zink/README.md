@@ -52,10 +52,22 @@ it goes back to the list. Read `/data/outsider-ps5/zink-smoke.log` (and klog):
 2. A WebGL 1 context in Outsider's JavaScript bindings, in place of the stub `getContext("webgl")` returns.
 3. For plugins built on pixi.js's WebGL internals, the real pixi.js v4 and pixi-tilemap for those games.
 
+## Build notes
+
+Built here on 2026-10-13 without the build image: PS5_Vulkan `252bf91` (PS5_Mesa `47e9eb6`), the SDK fork it pins
+(`b83202b`), clang 18 and LLVM 19. Mesa built and `zink-smoke.bin` linked and signed (about 33 MB). It has not run on
+a console yet.
+
+- `zink_libc.c` defines `isatty` and `mkstemp`. Mesa's ARB lexer, libc++ and ACO import them, and only
+  libScePosixForWebKit's stub would provide them, which leaves a null import at run time.
+- The link needs the platform layer's `ps5_klog_capture_stderr`, which sends Mesa's stderr to klog. The SDK fork
+  PS5_Vulkan pins has it; `link-zink-smoke.sh` stops with a message if the image's SDK doesn't.
+- The only import left that only a link stub defines is `readlink`, from RADV's `ac_gpu_info.c`. Every RADV title
+  has that one (see PS5_Vulkan's `tools/radv-link.sh`).
+- On a network that blocks zlib.net and wrapdb.mesonbuild.com, set `ZINK_PACKAGECACHE` (see `build-zink.sh`).
+
 ## Not known yet
 
-- Whether the image's payload SDK fork has `ps5_klog_capture_stderr`, which the EGL frontend calls.
-  `zink_smoke.c` defines a no-op fallback, which may hide Mesa's messages from klog.
 - PS5_Mesa `b3588f7` fixes Zink's persistently mapped buffers on a device without host-visible device-local memory.
   XashPS5 ran without it, but GL code that maps buffers persistently may need it.
 - The frontend always makes a 3840x2160 swapchain and scales the GL back buffer into it. PS5_Mesa `47e9eb6` now

@@ -24,6 +24,9 @@ zink="$(realpath "$2")"
 lib="${zink}/lib"
 # RADV from the same Mesa tree as Zink, not the image's
 archive="${lib}/libvulkan_radeon.a"
+# ps5_klog_capture_stderr: the EGL frontend sends Mesa's stderr to klog with it (SDK fork b83202b has it)
+grep -q ' T ps5_klog_capture_stderr$' < <("${sdk}/bin/llvm-nm" --defined-only "${sdk}/target/lib/libps5platform.a" 2>/dev/null) ||
+    { echo "link-zink-smoke.sh: the SDK's platform layer has no ps5_klog_capture_stderr; use PS5_Vulkan's pinned SDK fork" >&2; exit 2; }
 for file in "${archive}" "${lib}/libzink_ps5.a" "${lib}/libps5zinkegl.a" "${tool}" "${sdk}/bin/prospero-lld"; do
     [[ -e ${file} ]] || { echo "link-zink-smoke.sh: missing ${file}" >&2; exit 2; }
 done
@@ -39,6 +42,7 @@ cc -std=c++20 -O2 -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections 
     -c "${native}/app_cpp_runtime.cpp" -o "${work}/obj/app_cpp_runtime.o"
 # EGL_NO_X11: eglplatform.h would otherwise take the console (a __unix__ target) for X11
 cc -std=gnu11 -O2 -Wall -DEGL_NO_X11 -I"${zink}/include" -c "${ROOT}/zink/zink_smoke.c" -o "${work}/obj/zink_smoke.o"
+cc -std=gnu11 -O2 -Wall -c "${ROOT}/zink/zink_libc.c" -o "${work}/obj/zink_libc.o"
 
 stub() {
     cc -std=c11 -O2 -fPIC -c "${vk}/$2" -o "${work}/obj/$1_stub.o"
@@ -58,7 +62,8 @@ mesa=(
     "${lib}/libgallium.a" "${lib}/libglapi_bridge.a" "${lib}/libglapi.a" "${lib}/libglsl.a" "${lib}/libglcpp.a"
     "${lib}/libglsl_util.a" "${lib}/libmesa_sse41.a" "${lib}/libgalliumvl_stub.a"
 )
-printf '{\n    local:\n        __wrap_*;\n        __real_*;\n        ps5_klog_capture_stderr;\n};\n' > "${work}/local.map"
+# zink_libc.c's names stay local: an exported libc name would override the system's, and the converter refuses exports
+printf '{\n    local:\n        __wrap_*;\n        __real_*;\n        isatty;\n        mkstemp;\n};\n' > "${work}/local.map"
 
 # -u _ZTH23_mesa_glapi_tls_Context: the C++ TLS wrapper glapi names, which the patch's frontend defines empty; the
 # converter refuses an undefined one (XashPS5's finding)
@@ -68,7 +73,7 @@ printf '{\n    local:\n        __wrap_*;\n        __real_*;\n        ps5_klog_ca
     --version-script "${native}/app-symbols.map" --version-script "${work}/local.map" --exclude-libs=ALL \
     -e _start -u _ZTH23_mesa_glapi_tls_Context -o "${work}/llvm-pie.elf" \
     "${work}/obj/app_crt.o" "${work}/obj/app_cpp_runtime.o" "${work}/obj/zink_smoke.o" \
-    --start-group "${mesa[@]}" --end-group \
+    "${work}/obj/zink_libc.o" --start-group "${mesa[@]}" --end-group \
     "${work}/stubs/libSceAgc.so" "${work}/stubs/libSceAgcDriver.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "${sdk}"/target/lib/*.so
