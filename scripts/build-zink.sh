@@ -17,6 +17,9 @@
 #   PS5_RADV_SDK    the payload SDK fork, default /opt/ps5-sdk-radv
 #   ZINK_MESA_REV   PS5_Mesa revision, default the one $PS5_RADV/PS5_Vulkan/tools/build-radv.sh pins
 #   PS5_MESA_URL    default https://github.com/mihawk-99/PS5_Mesa.git
+#   ZINK_PACKAGECACHE  a folder with meson's downloads (zlib-1.3.1.tar.gz, zlib_1.3.1-1_patch.zip), copied into
+#                   the source's subprojects/packagecache: for a network that reaches GitHub but not zlib.net or
+#                   wrapdb.mesonbuild.com, which have no fallback for the patch
 #
 # Needs, besides the image's cross toolchain: network (the Mesa source and meson's zlib), meson >= 1.4, ninja, and
 # for Mesa's build-time OpenCL tools (mesa_clc, vtn_bindgen2) LLVM, Clang, libclc and the SPIR-V translator 19
@@ -79,6 +82,10 @@ if [[ ! -f ${src}/.zink-stamp || $(< "${src}/.zink-stamp") != "${stamp}" ]]; the
     git -C "${mesa}" archive "${ZINK_MESA_REV}" | tar -x -C "${src}"
     (cd "${src}" && git init -q && git apply --whitespace=nowarn "${patch}")
     printf '%s\n' "${stamp}" > "${src}/.zink-stamp"
+fi
+if [[ -n ${ZINK_PACKAGECACHE:-} ]]; then
+    mkdir -p "${src}/subprojects/packagecache"
+    cp "${ZINK_PACKAGECACHE}"/* "${src}/subprojects/packagecache/"
 fi
 
 # Host tools of the same revision, for the OpenCL C kernels RADV's geometry shaders run (as build-radv.sh builds them)
